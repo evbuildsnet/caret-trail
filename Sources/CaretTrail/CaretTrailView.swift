@@ -37,7 +37,16 @@ final class CaretTrailView: NSView {
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
-        shape.fillColor = NSColor.controlAccentColor.withAlphaComponent(0.65).cgColor
+        let accent = NSColor.controlAccentColor
+        // Bold: solid accent body, a thin bright edge, and a soft glow of the same hue around it.
+        shape.fillColor = accent.blended(withFraction: 0.15, of: .white)?.cgColor ?? accent.cgColor
+        shape.strokeColor = NSColor.white.withAlphaComponent(0.85).cgColor
+        shape.lineWidth = 0.75
+        shape.lineJoin = .round
+        shape.shadowColor = accent.cgColor
+        shape.shadowOpacity = 1
+        shape.shadowRadius = 5
+        shape.shadowOffset = .zero
         shape.opacity = 0
         layer?.addSublayer(shape)
     }
