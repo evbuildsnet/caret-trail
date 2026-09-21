@@ -22,7 +22,7 @@ final class OverlayWindow: NSWindow {
     override var canBecomeMain: Bool { false }
 
     /// Rects are in Cocoa screen coordinates.
-    func animate(from: CGRect, to: CGRect, duration: TimeInterval) {
+    func animate(from: CGRect, to: CGRect, settings: TrailSettings) {
         guard let screen = NSScreen.screens.first(where: { $0.frame.contains(to.origin) }) ?? NSScreen.main else { return }
         let screenChanged = currentScreen.map { $0.frame != screen.frame } ?? true
         if screenChanged { move(to: screen) }
@@ -36,7 +36,7 @@ final class OverlayWindow: NSWindow {
         trail.animate(
             from: from.offsetBy(dx: -origin.x, dy: -origin.y),
             to: to.offsetBy(dx: -origin.x, dy: -origin.y),
-            duration: duration
+            settings: settings
         )
     }
 

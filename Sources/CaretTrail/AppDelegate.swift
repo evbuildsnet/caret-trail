@@ -11,7 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 380),
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 420),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -24,7 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         tracker.onCaretMoved = { [weak self] from, to in
             guard let self, self.state.enabled else { return }
-            self.overlay.animate(from: from, to: to, duration: self.state.duration)
+            self.overlay.animate(from: from, to: to, settings: self.state.trail)
         }
         tracker.onCaretLost = { [weak self] in self?.overlay.hide() }
         tracker.onStatus = { [weak self] text in self?.state.status = text }

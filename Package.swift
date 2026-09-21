@@ -5,7 +5,8 @@ let package = Package(
     name: "CaretTrail",
     platforms: [.macOS(.v14)],
     targets: [
-        .executableTarget(name: "CaretTrail", path: "Sources/CaretTrail")
+        .executableTarget(name: "CaretTrail", path: "Sources/CaretTrail"),
+        .testTarget(name: "CaretTrailTests", dependencies: ["CaretTrail"]),
     ],
     swiftLanguageVersions: [.v5]
 )

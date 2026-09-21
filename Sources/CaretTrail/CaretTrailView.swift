@@ -1,54 +1,67 @@
 import AppKit
 import QuartzCore
 
-/// Draws a caret-shaped quad whose four corners move independently: corners facing the
-/// direction of travel race ahead, trailing corners lag, so the caret smears toward its
-/// destination and then fades out on top of the real caret.
+/// Draws a caret-shaped quad whose four corners ride independent springs. Corners facing the
+/// direction of travel are stiff and land on the real caret almost at once, never passing it;
+/// trailing corners are soft and carry momentum between moves, so the caret smears toward its
+/// destination and then fades out on top of the real caret. The smear reads like a comet: the
+/// further the tail is left behind, the narrower and more transparent it gets.
 final class CaretTrailView: NSView {
-    private struct Quad {
-        var points: [CGPoint] // top-left, top-right, bottom-right, bottom-left
-        init(rect: CGRect) {
-            points = [
-                CGPoint(x: rect.minX, y: rect.maxY),
-                CGPoint(x: rect.maxX, y: rect.maxY),
-                CGPoint(x: rect.maxX, y: rect.minY),
-                CGPoint(x: rect.minX, y: rect.minY),
-            ]
-        }
-        var center: CGPoint {
-            CGPoint(x: points.map(\.x).reduce(0, +) / 4, y: points.map(\.y).reduce(0, +) / 4)
-        }
-    }
-
     private enum Phase { case idle, moving, fading }
 
+    // Corner order: top-left, top-right, bottom-right, bottom-left.
+    private static let cornerSigns: [CGVector] = [
+        CGVector(dx: -1, dy: 1), CGVector(dx: 1, dy: 1), CGVector(dx: 1, dy: -1), CGVector(dx: -1, dy: -1),
+    ]
+    private static func corners(of rect: CGRect) -> [CGPoint] {
+        cornerSigns.map { CGPoint(x: $0.dx > 0 ? rect.maxX : rect.minX, y: $0.dy > 0 ? rect.maxY : rect.minY) }
+    }
+
+    // Spring rates are divided by the trail duration. Trailing corners are looser and a touch bouncy.
+    private static let leadRate: CGFloat = 25
+    private static let trailRate: CGFloat = 4.5
+    private static let leadDamping: CGFloat = 1
+    private static let trailDamping: CGFloat = 0.8
+    // Steps shorter than the caret is tall (typing) get a tail this much looser, otherwise the
+    // smear is over before it can be seen.
+    private static let shortStepLooseness: CGFloat = 0.3
+    // Stretch, in points, at which the tail is half as wide as the caret.
+    private static let taperLength: CGFloat = 25
+    private static let minTailWidth: CGFloat = 0.45
+    // Stretch, in points, at which the end of the tail is half transparent.
+    private static let fadeLength: CGFloat = 8
+    private static let minTailAlpha: CGFloat = 0.05
+    private static let glowMargin: CGFloat = 16
+
+    private let host = CALayer()          // carries the overall opacity and the tail fade mask
     private let shape = CAShapeLayer()
+    private let fade = CAGradientLayer()  // alpha ramp from the head of the trail to its tail
     private var displayLink: CADisplayLink?
 
     private var phase = Phase.idle
-    private var start = Quad(rect: .zero)
-    private var current = Quad(rect: .zero)
-    private var target = Quad(rect: .zero)
-    private var leadingness: [CGFloat] = [0, 0, 0, 0]
-    private var phaseStart: CFTimeInterval = 0
-    private var duration: CFTimeInterval = 0.12
+    private var springs = CaretTrailView.corners(of: .zero).map { Spring(position: $0) }
+    private var target = CaretTrailView.corners(of: .zero)
+    private var weights: [CGFloat] = [0, 0, 0, 0] // 1 = fully leading, 0 = fully trailing
+    private var tailLooseness: CGFloat = 1
+    private var settings = TrailSettings(duration: 0.12, color: .controlAccentColor)
+    private var lastTick: CFTimeInterval = 0
+    private var fadeStart: CFTimeInterval = 0
     private let fadeDuration: CFTimeInterval = 0.14
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
-        let accent = NSColor.controlAccentColor
-        // Bold: solid accent body, a thin bright edge, and a soft glow of the same hue around it.
-        shape.fillColor = accent.blended(withFraction: 0.15, of: .white)?.cgColor ?? accent.cgColor
+        // Bold: solid body, a thin bright edge, and a soft glow of the same hue around it.
         shape.strokeColor = NSColor.white.withAlphaComponent(0.85).cgColor
         shape.lineWidth = 0.75
         shape.lineJoin = .round
-        shape.shadowColor = accent.cgColor
         shape.shadowOpacity = 1
         shape.shadowRadius = 5
         shape.shadowOffset = .zero
-        shape.opacity = 0
-        layer?.addSublayer(shape)
+        host.opacity = 0
+        host.mask = fade
+        host.addSublayer(shape)
+        layer?.addSublayer(host)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -57,36 +70,52 @@ final class CaretTrailView: NSView {
 
     override func layout() {
         super.layout()
+        host.frame = bounds
         shape.frame = bounds
     }
 
-    func animate(from: CGRect, to: CGRect, duration: CFTimeInterval) {
-        start = phase == .idle ? Quad(rect: from) : current
-        current = start
-        target = Quad(rect: to)
-        self.duration = duration
+    func animate(from: CGRect, to: CGRect, settings: TrailSettings) {
+        let now = CACurrentMediaTime()
+        self.settings = settings
+        if phase != .moving {
+            springs = Self.corners(of: from).map { Spring(position: $0) }
+            lastTick = now
+        }
+        target = Self.corners(of: to)
+        let step = hypot(to.midX - from.midX, to.midY - from.midY)
+        tailLooseness = min(max(step / max(to.height, 1), Self.shortStepLooseness), 1)
 
-        let c = start.center
-        let dir = CGVector(dx: target.center.x - c.x, dy: target.center.y - c.y)
+        let center = CGPoint(
+            x: springs.map(\.position.x).reduce(0, +) / 4,
+            y: springs.map(\.position.y).reduce(0, +) / 4
+        )
+        let dir = CGVector(dx: to.midX - center.x, dy: to.midY - center.y)
         let len = hypot(dir.dx, dir.dy)
-        // Corner offsets normalised to (±1, ±1) so a thin caret still has clear leading corners.
-        leadingness = start.points.map { p in
-            guard len > 0 else { return 0 }
-            let ox: CGFloat = p.x >= c.x ? 1 : -1
-            let oy: CGFloat = p.y >= c.y ? 1 : -1
-            return (ox * dir.dx + oy * dir.dy) / (len * sqrt(2))
+        // Signs instead of real offsets so a thin caret still has clear leading corners.
+        weights = Self.cornerSigns.map { sign -> CGFloat in
+            guard len > 0 else { return 0.5 }
+            // ±1 for the corners of an axis-aligned move, so a horizontal move has a pure head and tail.
+            let leadingness: CGFloat = (sign.dx * dir.dx + sign.dy * dir.dy) / len
+            return min(max((leadingness + 1) / 2, 0), 1)
         }
 
         phase = .moving
-        phaseStart = CACurrentMediaTime()
-        setOpacity(1)
+        withoutActions {
+            // The accent colour is dynamic: resolve it now so system changes show up on the next move.
+            effectiveAppearance.performAsCurrentDrawingAppearance {
+                let color = settings.color
+                shape.fillColor = (color.blended(withFraction: 0.15, of: .white) ?? color).cgColor
+                shape.shadowColor = color.cgColor
+            }
+            host.opacity = 1
+        }
         render()
         startLink()
     }
 
     func hide() {
         phase = .idle
-        setOpacity(0)
+        withoutActions { host.opacity = 0 }
         stopLink()
     }
 
@@ -109,22 +138,31 @@ final class CaretTrailView: NSView {
         let now = CACurrentMediaTime()
         switch phase {
         case .moving:
-            let t = min(1, (now - phaseStart) / duration)
-            for i in 0..<4 {
-                let p = progress(corner: i, t: t)
-                current.points[i] = CGPoint(
-                    x: start.points[i].x + (target.points[i].x - start.points[i].x) * p,
-                    y: start.points[i].y + (target.points[i].y - start.points[i].y) * p
+            let dt = min(now - lastTick, 1.0 / 30)
+            lastTick = now
+            let leadOmega = Self.leadRate / settings.duration
+            let trailOmega = Self.trailRate * tailLooseness / settings.duration
+            var settled = true
+            for i in springs.indices {
+                springs[i].step(
+                    toward: target[i],
+                    omega: trailOmega + (leadOmega - trailOmega) * weights[i],
+                    damping: Self.trailDamping + (Self.leadDamping - Self.trailDamping) * weights[i],
+                    overshoots: weights[i] <= 0.5, // the head of the trail must never pass the real caret
+                    dt: dt
                 )
+                let distance = hypot(springs[i].position.x - target[i].x, springs[i].position.y - target[i].y)
+                let speed = hypot(springs[i].velocity.dx, springs[i].velocity.dy)
+                if distance > 0.5 || speed > 10 { settled = false }
             }
             render()
-            if t >= 1 {
+            if settled {
                 phase = .fading
-                phaseStart = now
+                fadeStart = now
             }
         case .fading:
-            let f = min(1, (now - phaseStart) / fadeDuration)
-            setOpacity(Float(1 - f))
+            let f = min(1, (now - fadeStart) / fadeDuration)
+            withoutActions { host.opacity = Float(1 - f) }
             if f >= 1 {
                 phase = .idle
                 stopLink()
@@ -134,28 +172,56 @@ final class CaretTrailView: NSView {
         }
     }
 
-    private func progress(corner: Int, t: CFTimeInterval) -> CGFloat {
-        let t = CGFloat(t)
-        let lead = 1 - pow(1 - t, 4)          // ease-out quart: leading corners jump ahead
-        let trail = t * t * (3 - 2 * t)        // smoothstep: trailing corners catch up later
-        let weight = (leadingness[corner] + 1) / 2
-        return trail + (lead - trail) * weight
+    /// Weighted centre of the head (`leading`) or tail corners.
+    private func centroid(of points: [CGPoint], leading: Bool) -> CGPoint {
+        var sum = CGPoint.zero
+        var total: CGFloat = 0
+        for (point, weight) in zip(points, weights) {
+            let w = leading ? weight : 1 - weight
+            sum.x += point.x * w
+            sum.y += point.y * w
+            total += w
+        }
+        return total > 0 ? CGPoint(x: sum.x / total, y: sum.y / total) : sum
     }
 
+    /// Squeezes the tail corners toward the tail's centre and fades them out, harder the further
+    /// the tail has been left behind. At rest nothing is squeezed or faded, so the shape still
+    /// merges into the caret.
     private func render() {
+        let points = springs.map(\.position)
+        let head = centroid(of: points, leading: true)
+        let tail = centroid(of: points, leading: false)
+        let restHead = centroid(of: target, leading: true)
+        let restTail = centroid(of: target, leading: false)
+        let stretch = max(0, hypot(head.x - tail.x, head.y - tail.y) - hypot(restHead.x - restTail.x, restHead.y - restTail.y))
+        let tailWidth = max(Self.minTailWidth, 1 / (1 + stretch / Self.taperLength))
+        let tailAlpha = max(Self.minTailAlpha, 1 / (1 + stretch / Self.fadeLength))
+
         let path = CGMutablePath()
-        path.addLines(between: current.points)
+        path.addLines(between: zip(points, weights).map { point, weight in
+            let scale = 1 - (1 - weight) * (1 - tailWidth)
+            return CGPoint(x: tail.x + (point.x - tail.x) * scale, y: tail.y + (point.y - tail.y) * scale)
+        })
         path.closeSubpath()
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        shape.path = path
-        CATransaction.commit()
+
+        let box = path.boundingBoxOfPath.insetBy(dx: -Self.glowMargin, dy: -Self.glowMargin)
+        func unit(_ point: CGPoint) -> CGPoint {
+            CGPoint(x: (point.x - box.minX) / box.width, y: (point.y - box.minY) / box.height)
+        }
+        withoutActions {
+            shape.path = path
+            fade.frame = box
+            fade.startPoint = unit(head)
+            fade.endPoint = unit(tail)
+            fade.colors = [CGColor(gray: 1, alpha: 1), CGColor(gray: 1, alpha: tailAlpha)]
+        }
     }
 
-    private func setOpacity(_ value: Float) {
+    private func withoutActions(_ body: () -> Void) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        shape.opacity = value
+        body()
         CATransaction.commit()
     }
 }

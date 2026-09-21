@@ -4,6 +4,13 @@ import SwiftUI
 struct SettingsView: View {
     @ObservedObject var state: AppState
 
+    private var trailColor: Binding<Color> {
+        Binding(
+            get: { Color(nsColor: state.trail.color) },
+            set: { state.customColor = NSColor($0) }
+        )
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Caret Trail").font(.title2).bold()
@@ -32,6 +39,17 @@ struct SettingsView: View {
                 Slider(value: $state.duration, in: 0.05...0.4)
             }
 
+            HStack {
+                ColorPicker("Trail color", selection: trailColor, supportsOpacity: false)
+                    .fixedSize()
+                Text(state.customColor == nil ? "Following system accent" : "Custom")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Use System Accent") { state.customColor = nil }
+                    .disabled(state.customColor == nil)
+            }
+
             GroupBox("Status") {
                 Text(state.status)
                     .font(.system(.caption, design: .monospaced))
@@ -46,6 +64,6 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
         }
         .padding(20)
-        .frame(width: 460, height: 380)
+        .frame(width: 460, height: 420)
     }
 }

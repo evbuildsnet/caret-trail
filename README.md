@@ -9,6 +9,7 @@ is now, then fades out on top of the real caret. The native caret is never hidde
 ```sh
 ./build.sh
 open build/CaretTrail.app
+swift test   # spring maths
 ```
 
 Then enable **Caret Trail** in System Settings → Privacy & Security → Accessibility.
@@ -27,8 +28,13 @@ rebuilds. Override with `CODESIGN_IDENTITY=...`.
   (AppKit). Zero-length ranges are only a last resort because AppKit reports them a line
   too high.
 - `OverlayWindow` is a borderless, click-through window at screen-saver level that joins
-  all Spaces. `CaretTrailView` moves the four corners of a caret-shaped quad with different
-  easing: corners facing the direction of travel race ahead, trailing corners lag.
+  all Spaces. `CaretTrailView` puts each corner of a caret-shaped quad on its own damped
+  spring: corners facing the direction of travel are stiff and land on the real caret within
+  a frame or two without ever passing it, trailing corners are soft and lag. Velocity carries
+  over between moves, so the trail has inertia. The further the tail is left behind, the
+  narrower and more transparent it gets.
+- The trail follows the system accent colour until a custom colour is picked in settings.
+  Settings persist in `UserDefaults`.
 
 Debug logging: `CARET_TRAIL_DEBUG=1 build/CaretTrail.app/Contents/MacOS/CaretTrail`.
 
