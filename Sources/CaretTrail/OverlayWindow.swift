@@ -1,9 +1,12 @@
 import AppKit
 
-/// Transparent, click-through window that spans the screen the caret is on.
+/// Transparent, click-through window that exists only while a trail is on screen and is sized to
+/// the trail itself. Between moves nothing of ours sits above other apps, so the window server has
+/// no extra full-screen layer to composite and hit-test against.
 final class OverlayWindow: NSWindow {
     private let trail = CaretTrailView()
-    private var currentScreen: NSScreen?
+    /// Room around the caret rects for the glow, the stroke, and a little spring overshoot.
+    private static let padding: CGFloat = 32
 
     init() {
         super.init(contentRect: .zero, styleMask: .borderless, backing: .buffered, defer: false)
@@ -15,35 +18,36 @@ final class OverlayWindow: NSWindow {
         collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
         isReleasedWhenClosed = false
         contentView = trail
-        if let screen = NSScreen.main { move(to: screen) }
+        trail.onExtentChanged = { [weak self] extent in
+            guard let self else { return }
+            let required = extent.insetBy(dx: -Self.padding, dy: -Self.padding).integral
+            if !self.frame.contains(required) {
+                self.setFrame(self.frame.union(required), display: false)
+            }
+        }
+        trail.onIdle = { [weak self] in
+            debugLog("overlay: idle, ordering out")
+            self?.orderOut(nil)
+        }
     }
 
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
-    /// Rects are in Cocoa screen coordinates.
+    /// Rects are in Cocoa screen coordinates. The window grows to cover both rects plus whatever
+    /// the trail currently occupies, so a move that lands mid-animation never gets clipped.
     func animate(from: CGRect, to: CGRect, settings: TrailSettings) {
-        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(to.origin) }) ?? NSScreen.main else { return }
-        let screenChanged = currentScreen.map { $0.frame != screen.frame } ?? true
-        if screenChanged { move(to: screen) }
-        guard !screenChanged, screen.frame.contains(from.origin) else {
-            debugLog("overlay: screen changed, skipping animation")
-            trail.hide()
-            return
-        }
-        debugLog("overlay: animate \(from.origin) -> \(to.origin) on screen \(screen.frame)")
-        let origin = screen.frame.origin
-        trail.animate(
-            from: from.offsetBy(dx: -origin.x, dy: -origin.y),
-            to: to.offsetBy(dx: -origin.x, dy: -origin.y),
-            settings: settings
-        )
+        var region = from.union(to)
+        if let extent = trail.extent { region = region.union(extent) }
+        region = region.insetBy(dx: -Self.padding, dy: -Self.padding).integral
+        debugLog("overlay: animate \(from.origin) -> \(to.origin) in \(region)")
+        if frame != region { setFrame(region, display: false) }
+        trail.animate(from: from, to: to, settings: settings)
+        if !isVisible { orderFrontRegardless() }
     }
 
-    func hide() { trail.hide() }
-
-    private func move(to screen: NSScreen) {
-        currentScreen = screen
-        setFrame(screen.frame, display: false)
+    func hide() {
+        trail.hide()
+        orderOut(nil)
     }
 }

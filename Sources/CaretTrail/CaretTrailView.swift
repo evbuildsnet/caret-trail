@@ -6,8 +6,25 @@ import QuartzCore
 /// trailing corners are soft and carry momentum between moves, so the caret smears toward its
 /// destination and then fades out on top of the real caret. The smear reads like a comet: the
 /// further the tail is left behind, the narrower and more transparent it gets.
+///
+/// Springs and targets stay in screen coordinates; only `render` maps them into the window,
+/// so the window is free to move and resize around the trail mid-animation.
 final class CaretTrailView: NSView {
     private enum Phase { case idle, moving, fading }
+
+    /// Fires once the trail has faded out completely.
+    var onIdle: (() -> Void)?
+
+    /// Gives the window a chance to accommodate spring overshoot before mapping into local space.
+    var onExtentChanged: ((CGRect) -> Void)?
+
+    /// Screen-space box around the trail's current corners while it is on screen.
+    var extent: CGRect? {
+        guard phase != .idle else { return nil }
+        let xs = springs.map(\.position.x)
+        let ys = springs.map(\.position.y)
+        return CGRect(x: xs.min()!, y: ys.min()!, width: xs.max()! - xs.min()!, height: ys.max()! - ys.min()!)
+    }
 
     // Corner order: top-left, top-right, bottom-right, bottom-left.
     private static let cornerSigns: [CGVector] = [
@@ -70,14 +87,42 @@ final class CaretTrailView: NSView {
 
     override func layout() {
         super.layout()
-        host.frame = bounds
-        shape.frame = bounds
+        withoutActions {
+            host.frame = bounds
+            shape.frame = bounds
+        }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateContentsScale()
+        if window != nil {
+            prepareLink()
+        } else {
+            displayLink?.invalidate()
+            displayLink = nil
+        }
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        updateContentsScale()
+    }
+
+    private func updateContentsScale() {
+        let scale = window?.backingScaleFactor ?? 1
+        withoutActions {
+            host.contentsScale = scale
+            shape.contentsScale = scale
+            fade.contentsScale = scale
+        }
     }
 
     func animate(from: CGRect, to: CGRect, settings: TrailSettings) {
         let now = CACurrentMediaTime()
         self.settings = settings
-        if phase != .moving {
+        let isStarting = phase != .moving
+        if isStarting {
             springs = Self.corners(of: from).map { Spring(position: $0) }
             lastTick = now
         }
@@ -100,6 +145,12 @@ final class CaretTrailView: NSView {
         }
 
         phase = .moving
+        if isStarting {
+            // Put a visible trail in the first submitted frame. Otherwise a resumed display link
+            // spends its first refresh displaying the old caret before any motion can appear.
+            let framesPerSecond = max(window?.screen?.maximumFramesPerSecond ?? 60, 30)
+            _ = advanceSprings(by: 1 / CGFloat(framesPerSecond))
+        }
         withoutActions {
             // The accent colour is dynamic: resolve it now so system changes show up on the next move.
             effectiveAppearance.performAsCurrentDrawingAppearance {
@@ -121,12 +172,17 @@ final class CaretTrailView: NSView {
 
     // MARK: - Frame loop
 
-    private func startLink() {
+    private func prepareLink() {
         if displayLink == nil {
             let link = self.displayLink(target: self, selector: #selector(tick(_:)))
+            link.isPaused = true
             link.add(to: .main, forMode: .common)
             displayLink = link
         }
+    }
+
+    private func startLink() {
+        prepareLink()
         displayLink?.isPaused = false
     }
 
@@ -135,26 +191,16 @@ final class CaretTrailView: NSView {
     }
 
     @objc private func tick(_ link: CADisplayLink) {
-        let now = CACurrentMediaTime()
+        advanceFrame(at: CACurrentMediaTime())
+    }
+
+    /// Advances the same frame clock for a display callback or an offscreen rendering check.
+    func advanceFrame(at now: CFTimeInterval) {
         switch phase {
         case .moving:
             let dt = min(now - lastTick, 1.0 / 30)
             lastTick = now
-            let leadOmega = Self.leadRate / settings.duration
-            let trailOmega = Self.trailRate * tailLooseness / settings.duration
-            var settled = true
-            for i in springs.indices {
-                springs[i].step(
-                    toward: target[i],
-                    omega: trailOmega + (leadOmega - trailOmega) * weights[i],
-                    damping: Self.trailDamping + (Self.leadDamping - Self.trailDamping) * weights[i],
-                    overshoots: weights[i] <= 0.5, // the head of the trail must never pass the real caret
-                    dt: dt
-                )
-                let distance = hypot(springs[i].position.x - target[i].x, springs[i].position.y - target[i].y)
-                let speed = hypot(springs[i].velocity.dx, springs[i].velocity.dy)
-                if distance > 0.5 || speed > 10 { settled = false }
-            }
+            let settled = advanceSprings(by: dt)
             render()
             if settled {
                 phase = .fading
@@ -162,14 +208,36 @@ final class CaretTrailView: NSView {
             }
         case .fading:
             let f = min(1, (now - fadeStart) / fadeDuration)
-            withoutActions { host.opacity = Float(1 - f) }
+            // Ease out of the settled caret and into transparency with no abrupt opacity slope.
+            let eased = f * f * (3 - 2 * f)
+            withoutActions { host.opacity = Float(1 - eased) }
             if f >= 1 {
                 phase = .idle
                 stopLink()
+                onIdle?()
             }
         case .idle:
             stopLink()
         }
+    }
+
+    private func advanceSprings(by dt: CGFloat) -> Bool {
+        let leadOmega = Self.leadRate / settings.duration
+        let trailOmega = Self.trailRate * tailLooseness / settings.duration
+        var settled = true
+        for i in springs.indices {
+            springs[i].step(
+                toward: target[i],
+                omega: trailOmega + (leadOmega - trailOmega) * weights[i],
+                damping: Self.trailDamping + (Self.leadDamping - Self.trailDamping) * weights[i],
+                overshoots: weights[i] <= 0.5, // the head of the trail must never pass the real caret
+                dt: dt
+            )
+            let distance = hypot(springs[i].position.x - target[i].x, springs[i].position.y - target[i].y)
+            let speed = hypot(springs[i].velocity.dx, springs[i].velocity.dy)
+            if distance > 0.5 || speed > 10 { settled = false }
+        }
+        return settled
     }
 
     /// Weighted centre of the head (`leading`) or tail corners.
@@ -189,11 +257,14 @@ final class CaretTrailView: NSView {
     /// the tail has been left behind. At rest nothing is squeezed or faded, so the shape still
     /// merges into the caret.
     private func render() {
-        let points = springs.map(\.position)
+        if let extent { onExtentChanged?(extent) }
+        let origin = window?.frame.origin ?? .zero
+        func local(_ point: CGPoint) -> CGPoint { CGPoint(x: point.x - origin.x, y: point.y - origin.y) }
+        let points = springs.map { local($0.position) }
         let head = centroid(of: points, leading: true)
         let tail = centroid(of: points, leading: false)
-        let restHead = centroid(of: target, leading: true)
-        let restTail = centroid(of: target, leading: false)
+        let restHead = local(centroid(of: target, leading: true))
+        let restTail = local(centroid(of: target, leading: false))
         let stretch = max(0, hypot(head.x - tail.x, head.y - tail.y) - hypot(restHead.x - restTail.x, restHead.y - restTail.y))
         let tailWidth = max(Self.minTailWidth, 1 / (1 + stretch / Self.taperLength))
         let tailAlpha = max(Self.minTailAlpha, 1 / (1 + stretch / Self.fadeLength))
@@ -211,6 +282,8 @@ final class CaretTrailView: NSView {
         }
         withoutActions {
             shape.path = path
+            // Supplying the silhouette avoids Core Animation discovering it from offscreen alpha.
+            shape.shadowPath = path
             fade.frame = box
             fade.startPoint = unit(head)
             fade.endPoint = unit(tail)

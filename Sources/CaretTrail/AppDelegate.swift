@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import Combine
 import SwiftUI
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -8,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let tracker = CaretTracker()
     private var window: NSWindow!
     private var trustTimer: Timer?
+    private var enabledObserver: AnyCancellable?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         window = NSWindow(
@@ -29,7 +31,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         tracker.onCaretLost = { [weak self] in self?.overlay.hide() }
         tracker.onStatus = { [weak self] text in self?.state.status = text }
 
-        overlay.orderFrontRegardless()
+        // Disabling stops the accessibility traffic entirely, not just the drawing.
+        enabledObserver = state.$enabled.sink { [weak self] enabled in
+            guard let self else { return }
+            self.checkTrust(enabled: enabled)
+        }
 
         let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
         _ = AXIsProcessTrustedWithOptions([promptKey: true] as CFDictionary)
@@ -39,10 +45,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func checkTrust() {
+    private func checkTrust(enabled: Bool? = nil) {
         let trusted = AXIsProcessTrusted()
         if state.trusted != trusted { state.trusted = trusted }
-        if trusted, !tracker.isRunning { tracker.start() }
+        if trusted, enabled ?? state.enabled {
+            if !tracker.isRunning { tracker.start() }
+        } else {
+            tracker.stop()
+            overlay.hide()
+        }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        trustTimer?.invalidate()
+        enabledObserver?.cancel()
+        tracker.stop()
+        overlay.hide()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }

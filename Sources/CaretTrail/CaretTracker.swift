@@ -17,27 +17,58 @@ final class CaretTracker {
     private var lastRect: CGRect?
     private var lastRange: CFRange?
     private var pollTimer: Timer?
+    private var lastStatus: String?
+    private lazy var refreshCoalescer = CaretRefreshCoalescer { [weak self] request in
+        self?.refresh(focusChanged: request.focusChanged, verifyFocus: request.verifyFocus)
+    }
 
+    // Deliberately no layout, move, or resize notifications: web content posts layout changes on
+    // every hover-induced style change, and each one used to cost the browser a burst of
+    // synchronous accessibility calls. The poll covers scrolling and window moves instead.
     private let notifications = [
         kAXFocusedUIElementChangedNotification,
         kAXFocusedWindowChangedNotification,
         kAXSelectedTextChangedNotification,
-        kAXWindowMovedNotification,
-        kAXWindowResizedNotification,
-        kAXLayoutChangedNotification,
     ]
+
+    /// Poll fast while a caret is being followed, slowly while waiting for one to appear.
+    private static let trackingPollInterval: TimeInterval = 0.2
+    private static let idlePollInterval: TimeInterval = 1
 
     func start() {
         guard !isRunning else { return }
         isRunning = true
+        // Every accessibility call blocks our main thread until the other app answers. Never wait
+        // long for a busy app; a missed frame is better than a frozen overlay.
+        AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.05)
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(appActivated(_:)),
             name: NSWorkspace.didActivateApplicationNotification, object: nil
         )
         if let app = NSWorkspace.shared.frontmostApplication { attach(to: app) }
-        // Catches scrolling and apps that don't post selection notifications.
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
-            self?.refresh(focusChanged: false)
+        schedulePoll()
+    }
+
+    func stop() {
+        guard isRunning else { return }
+        isRunning = false
+        pollTimer?.invalidate()
+        pollTimer = nil
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+        detach()
+    }
+
+    /// Catches scrolling, window moves, and apps that don't post selection notifications.
+    private func schedulePoll() {
+        pollTimer?.invalidate()
+        guard isRunning else { return }
+        let interval = lastRect == nil ? Self.idlePollInterval : Self.trackingPollInterval
+        pollTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
+            guard let self, self.isRunning else { return }
+            // A pending focus notification must still suppress animation if a poll arrives first.
+            let pending = self.refreshCoalescer.takePending()
+            self.refresh(focusChanged: pending?.focusChanged ?? false)
+            self.schedulePoll()
         }
     }
 
@@ -50,18 +81,18 @@ final class CaretTracker {
 
     private func attach(to app: NSRunningApplication) {
         detach()
+        defer { schedulePoll() }
         let pid = app.processIdentifier
         guard pid != getpid() else {
-            onStatus?("Caret Trail is frontmost. Switch to another app.")
+            publishStatus("Caret Trail is frontmost. Switch to another app.")
             return
         }
         var created: AXObserver?
         guard AXObserverCreate(pid, axCallback, &created) == .success, let observer = created else {
-            onStatus?("Could not observe \(app.localizedName ?? "app")")
+            publishStatus("Could not observe \(app.localizedName ?? "app")")
             return
         }
         let element = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(element, 0.05)
         // Chromium/Electron only build their accessibility tree when asked to.
         AXUIElementSetAttributeValue(element, "AXManualAccessibility" as CFString, kCFBooleanTrue)
 
@@ -78,35 +109,60 @@ final class CaretTracker {
     }
 
     private func detach() {
+        refreshCoalescer.takePending()
         if let observer {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
         }
         observer = nil
         appElement = nil
         focusedElement = nil
-        lastRect = nil
-        lastRange = nil
+        clearCaret()
     }
 
-    fileprivate func handle(notification: String) {
+    fileprivate func handle(notification: String, element: AXUIElement) {
+        guard isRunning else { return }
         debugLog("tracker: notification \(notification)")
         let focusChanged = notification == kAXFocusedUIElementChangedNotification
             || notification == kAXFocusedWindowChangedNotification
-        refresh(focusChanged: focusChanged)
+        // Selection events from the cached field need no extra IPC to rediscover that field.
+        // App-level events and polling still verify focus, including silent focus changes.
+        let isFocusedElement = focusedElement.map { CFEqual($0, element) } ?? false
+        refreshCoalescer.request(focusChanged: focusChanged, verifyFocus: focusChanged || !isFocusedElement)
+    }
+
+    private func observeFocusedElement(_ element: AXUIElement?) {
+        guard let observer, let appElement else { return }
+        if let previous = focusedElement, !CFEqual(previous, appElement) {
+            AXObserverRemoveNotification(observer, previous, kAXSelectedTextChangedNotification as CFString)
+        }
+        focusedElement = element
+        if let element, !CFEqual(element, appElement) {
+            // Some apps post selection changes only on their text field, not the application.
+            AXObserverAddNotification(observer, element, kAXSelectedTextChangedNotification as CFString,
+                                      Unmanaged.passUnretained(self).toOpaque())
+        }
     }
 
     // MARK: - Caret lookup
 
     /// Re-reads the caret. A changed selection range means the caret moved by itself: animate.
-    /// Same range but a different rect means the content scrolled or the window moved: just remember it.
-    private func refresh(focusChanged: Bool) {
+    /// Same range but a different rect means scrolling or a window move: hide the old trail and remember it.
+    private func refresh(focusChanged: Bool, verifyFocus: Bool = true) {
         guard let appElement else { return }
-        guard let element = focusedUIElement(of: appElement) else {
+        let wasTracking = lastRect != nil
+        defer {
+            // Do not leave a newly discovered caret waiting on the previous one-second idle timer.
+            if wasTracking != (lastRect != nil) { schedulePoll() }
+        }
+        let element = verifyFocus ? focusedUIElement(of: appElement) : focusedElement
+        guard let element else {
+            observeFocusedElement(nil)
             lose("No focused element in \(appName)")
             return
         }
         let elementChanged = focusedElement.map { !CFEqual($0, element) } ?? true
-        focusedElement = element
+        if elementChanged { observeFocusedElement(element) }
+        if focusChanged || elementChanged { clearCaret() }
 
         guard let range = selectedRange(of: element) else {
             lose("\(appName): focused element has no text selection")
@@ -123,20 +179,36 @@ final class CaretTracker {
 
         let moved = lastRange.map { $0.location != range.location } ?? false
         debugLog("tracker: focusChanged=\(focusChanged) elementChanged=\(elementChanged) moved=\(moved) rect=\(rect) last=\(String(describing: lastRect))")
-        if !elementChanged, !focusChanged, moved, let from = lastRect, from != rect {
-            onCaretMoved?(from, rect)
+        if let from = lastRect, from != rect {
+            if moved {
+                onCaretMoved?(from, rect)
+            } else {
+                // A scroll or window move invalidates any trail still fading at the old position.
+                onCaretLost?()
+            }
         }
         lastRect = rect
         lastRange = range
-        onStatus?("\(appName): caret at \(Int(rect.minX)), \(Int(rect.minY)) h=\(Int(rect.height))")
+        publishStatus("\(appName): caret at \(Int(rect.minX)), \(Int(rect.minY)) h=\(Int(rect.height))")
     }
 
     private func lose(_ reason: String) {
         debugLog("tracker: lost: \(reason)")
+        clearCaret()
+        publishStatus(reason)
+    }
+
+    private func clearCaret() {
+        let hadCaret = lastRect != nil
         lastRect = nil
         lastRange = nil
-        onCaretLost?()
-        onStatus?(reason)
+        if hadCaret { onCaretLost?() }
+    }
+
+    private func publishStatus(_ status: String) {
+        guard status != lastStatus else { return }
+        lastStatus = status
+        onStatus?(status)
     }
 
     private func focusedUIElement(of app: AXUIElement) -> AXUIElement? {
@@ -228,8 +300,8 @@ final class CaretTracker {
     }
 }
 
-private let axCallback: AXObserverCallback = { _, _, notification, refcon in
+private let axCallback: AXObserverCallback = { _, element, notification, refcon in
     guard let refcon else { return }
     let tracker = Unmanaged<CaretTracker>.fromOpaque(refcon).takeUnretainedValue()
-    tracker.handle(notification: notification as String)
+    tracker.handle(notification: notification as String, element: element)
 }
