@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="Assets/AppIcon.png" width="128" height="128" alt="Caret Trail app icon">
+  <img src="Assets/AppIcon.png" width="96" height="96" alt="Caret Trail app icon">
 </p>
 
 # Caret Trail
@@ -7,6 +7,10 @@
 **Keep your place. Enjoy every move.**
 
 A fluid, luminous trail helps your eyes follow the text cursor as you write, edit, and jump around the page. Caret Trail brings a little more life to everyday typing on your Mac, then gently fades back into the cursor you already know.
+
+![Caret Trail in TextEdit: moving across words, down lines, and diagonally between short and long paragraphs.](docs/assets/caret-trail-demo.gif)
+
+[Watch the full-quality demo](docs/assets/caret-trail-demo.mp4) · Recorded in TextEdit on macOS, at real speed with the default 120 ms trail.
 
 Pick a color or follow your Mac’s accent color. Set the pace from a quick flicker to a longer glide. Your usual text cursor stays in place throughout.
 
