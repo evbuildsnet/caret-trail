@@ -14,7 +14,7 @@ struct SettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Caret Trail").font(.title2).bold()
-            Text("Draws a smooth trail that follows the text caret in every app and merges into it.")
+            Text("Keep your place. Enjoy every move. A luminous trail helps your eyes follow the text cursor as you write and edit.")
                 .foregroundStyle(.secondary)
 
             GroupBox("Accessibility permission") {
