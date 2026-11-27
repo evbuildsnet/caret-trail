@@ -3,67 +3,208 @@ import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject var state: AppState
-
-    private var trailColor: Binding<Color> {
-        Binding(
-            get: { Color(nsColor: state.trail.color) },
-            set: { state.customColor = NSColor($0) }
-        )
-    }
+    var onTestCaretMoved: (CGRect, CGRect) -> Void = { _, _ in }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Caret Trail").font(.title2).bold()
-            Text("Keep your place. Enjoy every move. A luminous trail helps your eyes follow the text cursor as you write and edit.")
-                .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 18) {
+                Toggle(state.t("Enabled"), isOn: $state.enabled)
+                    .font(.headline)
+                Spacer()
+                permission(state.t("Accessibility"), granted: state.trusted, needed: true, pane: "Privacy_Accessibility")
+                permission(state.t("Screen Recording"), granted: state.screenAccess, needed: state.maskCaret, pane: "Privacy_ScreenCapture")
+            }
 
-            GroupBox("Accessibility permission") {
-                HStack {
-                    Circle().fill(state.trusted ? Color.green : Color.red).frame(width: 10, height: 10)
-                    Text(state.trusted ? "Granted" : "Not granted. Enable Caret Trail in System Settings.")
-                    Spacer()
-                    if !state.trusted {
-                        Button("Open System Settings") {
-                            let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
-                            NSWorkspace.shared.open(url)
+            HStack(alignment: .top, spacing: 14) {
+                VStack(alignment: .leading, spacing: 14) {
+                    section(state.t("Look")) {
+                        Picker(state.t("Effect"), selection: $state.glide) {
+                            Text(state.t("Comet trail")).tag(false)
+                            Text(state.t("Glide (comet in terminals)")).tag(true)
                         }
+                        .pickerStyle(.menu)
+                        .tint(.white)
+                        .fixedSize()
+                        HStack {
+                            Text(state.t("Duration"))
+                            Slider(value: $state.duration, in: 0.05...0.6, step: 0.05)
+                            Text("\(Int((state.duration * 1000).rounded())) ms")
+                                .monospacedDigit()
+                                .frame(width: 52, alignment: .trailing)
+                        }
+                        HStack {
+                            // A disabled slider dims itself but not the texts beside it.
+                            Text(state.t("Tail length"))
+                                .foregroundStyle(state.glide ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.primary))
+                            Slider(value: $state.tailLength, in: 0.5...4, step: 0.5)
+                            Text(String(format: "%.1f×", state.tailLength))
+                                .monospacedDigit()
+                                .frame(width: 52, alignment: .trailing)
+                                .foregroundStyle(state.glide ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.primary))
+                        }
+                        .disabled(state.glide)
+                        HStack {
+                            Text(state.t("Opacity"))
+                            Slider(value: $state.opacity, in: 0.1...1, step: 0.1)
+                            Text("\(Int((state.opacity * 100).rounded())) %")
+                                .monospacedDigit()
+                                .frame(width: 52, alignment: .trailing)
+                        }
+                        HStack {
+                            Text(state.t("Color"))
+                            colorButton
+                            Button(state.t("Use system accent color")) { state.customColor = nil }
+                            .tint(.white)
+                                .disabled(state.customColor == nil)
+                        }
+                        Toggle(state.t("Glow (Comet trail) / Halo (Glide)"), isOn: $state.glow)
+                    }
+                    section(state.t("Glide")) {
+                        Toggle(state.t("Fast start, soft landing"), isOn: $state.wordCurve)
+                        Toggle(state.t("Hide the real caret (needs Screen Recording)"), isOn: $state.maskCaret)
+                        HStack {
+                            Text(state.t("Halo intensity"))
+                                .foregroundStyle(haloOff ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.primary))
+                            Slider(value: $state.haloIntensity, in: 0.5...3, step: 0.25)
+                            Text(String(format: "%.2f×", state.haloIntensity))
+                                .monospacedDigit()
+                                .frame(width: 52, alignment: .trailing)
+                                .foregroundStyle(haloOff ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.primary))
+                        }
+                        .disabled(!state.glow)
+                    }
+                    .disabled(!state.glide)
+                }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+
+                VStack(alignment: .leading, spacing: 14) {
+                    section(state.t("Behaviour")) {
+                        Toggle(state.t("No effect on mouse clicks"), isOn: $state.ignoreClicks)
+                        Toggle(state.t("No effect on line breaks"), isOn: $state.noLineBreaks)
+                        Toggle(state.t("Ignore hidden cursor jumps in terminals"), isOn: $state.terminalFix)
+                        Button(state.t("Ignored apps…") + " (\(state.ignoredApps.count))") { state.showingIgnoredApps = true }
+                            .tint(.white)
+                    }
+                    section(state.t("App")) {
+                        Toggle(state.t("Open at login"), isOn: $state.openAtLogin)
+                        Toggle(state.t("Keep this window on top"), isOn: $state.keepOnTop)
+                        Picker(state.t("Show in"), selection: $state.placement) {
+                            Text(state.t("Dock")).tag("dock")
+                            Text(state.t("Menu bar")).tag("menuBar")
+                            Text(state.t("Both")).tag("both")
+                        }
+                        .pickerStyle(.menu)
+                        .tint(.white)
+                        .fixedSize()
                     }
                 }
-                .padding(4)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
 
-            Toggle("Enabled", isOn: $state.enabled)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Trail duration: \(Int(state.duration * 1000)) ms")
-                Slider(value: $state.duration, in: 0.05...0.4)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Text(state.t("Try it here")).font(.caption).foregroundStyle(.white.opacity(0.85))
+                    NeonMark(color: neon).frame(width: 30, height: 18)
+                }
+                CaretTestField(state: state, onCaretMoved: onTestCaretMoved)
+                    .frame(height: 56)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.05)))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(neon.opacity(0.2), lineWidth: 1))
+                    .shadow(color: neon.opacity(0.06), radius: 8)
+                HStack {
+                    Text(state.t(state.status))
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Spacer()
+                    languageMenu
+                }
             }
-
-            HStack {
-                ColorPicker("Trail color", selection: trailColor, supportsOpacity: false)
-                    .fixedSize()
-                Text(state.customColor == nil ? "Following system accent" : "Custom")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button("Use System Accent") { state.customColor = nil }
-                    .disabled(state.customColor == nil)
-            }
-
-            GroupBox("Status") {
-                Text(state.status)
-                    .font(.system(.caption, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(4)
-            }
-
-            Spacer()
-
-            Text("Switch to any other app and move the caret with arrows, clicks, or typing.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+        }
+        .sheet(isPresented: $state.showingIgnoredApps) {
+            IgnoredAppsView(state: state)
+                .tint(NeonTheme.controlTint(state.trail.color))
+                .background(NeonTheme.background(state.trail.color))
+                .environment(\.colorScheme, .dark)
         }
         .padding(20)
-        .frame(width: 460, height: 420)
+        .frame(width: 900)
+        .tint(NeonTheme.controlTint(state.trail.color))
+        .background(NeonTheme.background(state.trail.color))
+        .environment(\.colorScheme, .dark)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// Small and quiet, bottom right: Auto follows the macOS language.
+    private var languageMenu: some View {
+        // The globe sits outside the menu button: inside it, AppKit draws image and title on
+        // different baselines. Side by side in an HStack, their centres line up.
+        HStack(spacing: 3) {
+            Image(systemName: "globe")
+            Menu {
+                Button((state.language == "auto" ? "✓ " : "    ") + "Auto (\(L10n.systemLanguage.uppercased()))") { state.language = "auto" }
+                Divider()
+                ForEach(L10n.languages, id: \.self) { code in
+                    Button((state.language == code ? "✓ " : "    ") + (L10n.names[code] ?? code)) { state.language = code }
+                }
+            } label: {
+                Text(state.lang.uppercased())
+            }
+            .menuStyle(.borderlessButton)
+            .tint(.white)
+            .menuIndicator(.hidden)
+            .fixedSize()
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
+
+    /// The current colour as a swatch and its hex code; opens the picker.
+    private var colorButton: some View {
+        Button {
+            state.colorEditor.load(state.trail.color)
+            state.colorEditor.onChange = { [weak state] in state?.customColor = $0 }
+            state.showingColorPicker = true
+        } label: {
+            HStack(spacing: 6) {
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(neon)
+                    .frame(width: 22, height: 14)
+                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(.white.opacity(0.3), lineWidth: 1))
+                Text(ColorEditor.hex(of: state.trail.color))
+                    .font(.system(.callout, design: .monospaced))
+            }
+        }
+        .tint(.white)
+        .fixedSize()
+        .popover(isPresented: $state.showingColorPicker, arrowEdge: .bottom) {
+            ColorEditorView(editor: state.colorEditor)
+        }
+    }
+
+    /// The halo slider only matters in glide mode with the halo on.
+    private var haloOff: Bool { !state.glide || !state.glow }
+
+    private var neon: Color { Color(nsColor: state.trail.color) }
+
+    private func section<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        NeonSection(title: title, color: neon) { content() }
+    }
+
+    /// Green when granted, red when missing and needed (with a way to fix it), grey when unused.
+    private func permission(_ name: String, granted: Bool, needed: Bool, pane: String) -> some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(granted ? Color.green : needed ? Color.red : Color.gray)
+                .frame(width: 9, height: 9)
+            Text(name).font(.callout)
+            if needed && !granted {
+                Button(state.t("Open Settings")) {
+                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)")!)
+                }
+                .controlSize(.small)
+            }
+        }
+        .help("\(name): " + state.t(granted ? "granted" : needed ? "missing: grant it in System Settings, then quit and reopen Caret Trail." : "not used by the current settings"))
     }
 }

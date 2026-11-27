@@ -37,7 +37,7 @@ final class OverlayWindow: NSWindow {
     /// Rects are in Cocoa screen coordinates. The window grows to cover both rects plus whatever
     /// the trail currently occupies, so a move that lands mid-animation never gets clipped.
     func animate(from: CGRect, to: CGRect, settings: TrailSettings) {
-        var region = from.union(to)
+        var region = from.union(to).insetBy(dx: -2, dy: -2)
         if let extent = trail.extent { region = region.union(extent) }
         region = region.insetBy(dx: -Self.padding, dy: -Self.padding).integral
         debugLog("overlay: animate \(from.origin) -> \(to.origin) in \(region)")

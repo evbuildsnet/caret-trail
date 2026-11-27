@@ -3,6 +3,23 @@ import AppKit
 struct TrailSettings {
     var duration: Double
     var color: NSColor
+    /// A caret-sized bar glides to the new place instead of the comet smear.
+    var glide = false
+    /// The glide follows Word's curve, cubic-bezier(0, 0, 0, 1): fast start, long settle. Word uses 100 ms.
+    var wordCurve = false
+    /// The soft halo around the trail.
+    var glow = true
+    /// Comet only: how far the tail lags behind (1 = original). It also stretches the taper and
+    /// the fade, so a longer tail stays visible instead of thinning out at once.
+    var tailLength: CGFloat = 1
+    /// Both effects: how opaque the trail or the gliding bar is, halo included (1 = solid).
+    var opacity: CGFloat = 1
+    /// Glide only: how wide and bright the halo is (1 = original).
+    var haloIntensity: CGFloat = 1
+    /// Prototype, glide mode only: cover the real caret with this colour while ours glides.
+    var maskColor: NSColor? = nil
+    /// The real caret's colour, for our gliding one. Defaults to the trail colour.
+    var caretColor: NSColor? = nil
 }
 
 /// Settings persist in UserDefaults; `trusted` and `status` are live state.
@@ -23,11 +40,72 @@ final class AppState: ObservableObject {
             Self.defaults.set(data, forKey: "trailColor")
         }
     }
+    @Published var tailLength = defaults.object(forKey: "tailLength") as? Double ?? 1 {
+        didSet { Self.defaults.set(tailLength, forKey: "tailLength") }
+    }
+    @Published var glide = defaults.object(forKey: "glide") as? Bool ?? false {
+        didSet { Self.defaults.set(glide, forKey: "glide") }
+    }
+    @Published var wordCurve = defaults.object(forKey: "wordCurve") as? Bool ?? false {
+        didSet { Self.defaults.set(wordCurve, forKey: "wordCurve") }
+    }
+    @Published var opacity = defaults.object(forKey: "opacity") as? Double ?? 1 {
+        didSet { Self.defaults.set(opacity, forKey: "opacity") }
+    }
+    @Published var haloIntensity = defaults.object(forKey: "haloIntensity") as? Double ?? 1 {
+        didSet { Self.defaults.set(haloIntensity, forKey: "haloIntensity") }
+    }
+    @Published var glow = defaults.object(forKey: "glow") as? Bool ?? true {
+        didSet { Self.defaults.set(glow, forKey: "glow") }
+    }
+    @Published var ignoreClicks = defaults.object(forKey: "ignoreClicks") as? Bool ?? false {
+        didSet { Self.defaults.set(ignoreClicks, forKey: "ignoreClicks") }
+    }
+    @Published var terminalFix = defaults.object(forKey: "terminalFix") as? Bool ?? true {
+        didSet { Self.defaults.set(terminalFix, forKey: "terminalFix") }
+    }
+    @Published var maskCaret = defaults.object(forKey: "maskCaret") as? Bool ?? false {
+        didSet { Self.defaults.set(maskCaret, forKey: "maskCaret") }
+    }
+    @Published var noLineBreaks = defaults.object(forKey: "noLineBreaks") as? Bool ?? false {
+        didSet { Self.defaults.set(noLineBreaks, forKey: "noLineBreaks") }
+    }
+    /// Where the app shows itself: "dock", "menuBar" or "both".
+    @Published var placement = defaults.string(forKey: "placement") ?? "dock" {
+        didSet { Self.defaults.set(placement, forKey: "placement") }
+    }
+    /// Bundle identifiers of the apps to leave alone.
+    @Published var ignoredApps = defaults.stringArray(forKey: "ignoredApps") ?? [] {
+        didSet { Self.defaults.set(ignoredApps, forKey: "ignoredApps") }
+    }
+    /// Window state, not saved: the ignored apps sheet and its selected row.
+    @Published var showingIgnoredApps = false
+    @Published var showingColorPicker = false
+    let colorEditor = ColorEditor()
+    @Published var ignoredSelection: String?
+    /// The settings window stays above other apps' windows.
+    @Published var keepOnTop = defaults.object(forKey: "keepOnTop") as? Bool ?? false {
+        didSet { Self.defaults.set(keepOnTop, forKey: "keepOnTop") }
+    }
+    /// Mirrors the system's login item; the app delegate registers and unregisters it.
+    @Published var openAtLogin = false
+    @Published var screenAccess = false
     @Published var trusted = false
     @Published var status = "Waiting for the caret to move…"
+    /// "auto" follows the macOS language; otherwise "en", "fr", "it" or "de".
+    @Published var language = defaults.string(forKey: "language") ?? "auto" {
+        didSet { Self.defaults.set(language, forKey: "language") }
+    }
+    var lang: String { language == "auto" ? L10n.systemLanguage : language }
+
+    /// The interface string in the current language (English when no translation exists).
+    func t(_ english: String) -> String { L10n.table[lang]?[english] ?? english }
+    func t(_ english: String, _ args: CVarArg...) -> String { String(format: t(english), arguments: args) }
 
     var trail: TrailSettings {
-        TrailSettings(duration: duration, color: customColor ?? .controlAccentColor)
+        TrailSettings(duration: duration, color: customColor ?? .controlAccentColor,
+                      glide: glide, wordCurve: wordCurve, glow: glow, tailLength: tailLength,
+                      opacity: opacity, haloIntensity: haloIntensity)
     }
 }
 
@@ -35,6 +113,6 @@ final class AppState: ObservableObject {
 let debugEnabled = ProcessInfo.processInfo.environment["CARET_TRAIL_DEBUG"] == "1"
 func debugLog(_ message: @autoclosure () -> String) {
     guard debugEnabled else { return }
-    print(message())
+    print(String(format: "%.3f ", Date().timeIntervalSince1970.truncatingRemainder(dividingBy: 1000)) + message())
     fflush(stdout)
 }
