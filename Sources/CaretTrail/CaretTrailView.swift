@@ -176,6 +176,9 @@ final class CaretTrailView: NSView {
             }
             shape.strokeColor = NSColor.white.withAlphaComponent(0.85).cgColor
             shape.shadowOpacity = settings.glow ? 1 : 0
+            shape.shadowRadius = 5
+            // On the shape, not the host: the host's opacity runs the fade-out.
+            shape.opacity = Float(settings.opacity)
             host.opacity = 1
         }
         render()
@@ -202,6 +205,9 @@ final class CaretTrailView: NSView {
             maskLayer.isHidden = maskRect == nil
             shape.strokeColor = nil
             shape.shadowOpacity = settings.glow ? 1 : 0
+            shape.shadowRadius = 5 * settings.haloIntensity
+            // The mask over the real caret is a sibling layer, so it stays opaque.
+            shape.opacity = Float(settings.opacity)
             host.opacity = 1
         }
         render()
@@ -370,7 +376,7 @@ final class CaretTrailView: NSView {
             shape.path = path
             // Supplying the silhouette avoids Core Animation discovering it from offscreen alpha.
             // A 2 pt bar blurs into almost nothing: the glide's halo comes from a wider silhouette.
-            shape.shadowPath = settings.glide ? Self.glowSilhouette(around: path.boundingBoxOfPath) : path
+            shape.shadowPath = settings.glide ? Self.glowSilhouette(around: path.boundingBoxOfPath, intensity: settings.haloIntensity) : path
             fade.frame = settings.glide ? bounds : box
             if let maskRect {
                 maskLayer.frame = CGRect(origin: local(maskRect.origin), size: maskRect.size)
@@ -381,8 +387,10 @@ final class CaretTrailView: NSView {
         }
     }
 
-    static func glowSilhouette(around box: CGRect) -> CGPath {
-        CGPath(roundedRect: box.insetBy(dx: -3, dy: -1), cornerWidth: 3, cornerHeight: 3, transform: nil)
+    /// The halo grows with its intensity; at 3 it still fits the overlay window's 32 pt padding.
+    static func glowSilhouette(around box: CGRect, intensity: CGFloat = 1) -> CGPath {
+        CGPath(roundedRect: box.insetBy(dx: -3 * intensity, dy: -intensity),
+               cornerWidth: 3 * intensity, cornerHeight: 3 * intensity, transform: nil)
     }
 
     private func withoutActions(_ body: () -> Void) {

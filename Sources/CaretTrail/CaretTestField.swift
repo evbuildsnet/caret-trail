@@ -182,11 +182,12 @@ final class GlideTextView: NSTextView {
             caret.backgroundColor = NSColor.textColor.cgColor
             caret.shadowColor = trail.color.cgColor
         }
-        caret.shadowOpacity = trail.glow ? 1 : 0
-        caret.shadowRadius = 5
+        // This caret stays once it lands, as the real one would: opacity only lightens its halo.
+        caret.shadowOpacity = trail.glow ? Float(trail.opacity) : 0
+        caret.shadowRadius = 5 * trail.haloIntensity
         caret.shadowOffset = .zero
         caret.bounds = CGRect(origin: .zero, size: rect.size)
-        caret.shadowPath = CaretTrailView.glowSilhouette(around: caret.bounds)
+        caret.shadowPath = CaretTrailView.glowSilhouette(around: caret.bounds, intensity: trail.haloIntensity)
         caret.position = rect.origin
         caret.isHidden = false
         CATransaction.commit()

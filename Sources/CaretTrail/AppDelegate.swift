@@ -32,6 +32,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             defer: false
         )
         window.title = "Caret Trail"
+        // AppKit releases a closed window by default, while `window` still points to it: the
+        // next click on the menu bar icon then reopened freed memory and crashed.
+        window.isReleasedWhenClosed = false
         // The neon background runs under a transparent title bar; the window is always dark.
         window.titlebarAppearsTransparent = true
         window.isMovableByWindowBackground = true

@@ -12,6 +12,10 @@ struct TrailSettings {
     /// Comet only: how far the tail lags behind (1 = original). It also stretches the taper and
     /// the fade, so a longer tail stays visible instead of thinning out at once.
     var tailLength: CGFloat = 1
+    /// Both effects: how opaque the trail or the gliding bar is, halo included (1 = solid).
+    var opacity: CGFloat = 1
+    /// Glide only: how wide and bright the halo is (1 = original).
+    var haloIntensity: CGFloat = 1
     /// Prototype, glide mode only: cover the real caret with this colour while ours glides.
     var maskColor: NSColor? = nil
     /// The real caret's colour, for our gliding one. Defaults to the trail colour.
@@ -45,6 +49,12 @@ final class AppState: ObservableObject {
     @Published var wordCurve = defaults.object(forKey: "wordCurve") as? Bool ?? false {
         didSet { Self.defaults.set(wordCurve, forKey: "wordCurve") }
     }
+    @Published var opacity = defaults.object(forKey: "opacity") as? Double ?? 1 {
+        didSet { Self.defaults.set(opacity, forKey: "opacity") }
+    }
+    @Published var haloIntensity = defaults.object(forKey: "haloIntensity") as? Double ?? 1 {
+        didSet { Self.defaults.set(haloIntensity, forKey: "haloIntensity") }
+    }
     @Published var glow = defaults.object(forKey: "glow") as? Bool ?? true {
         didSet { Self.defaults.set(glow, forKey: "glow") }
     }
@@ -70,6 +80,8 @@ final class AppState: ObservableObject {
     }
     /// Window state, not saved: the ignored apps sheet and its selected row.
     @Published var showingIgnoredApps = false
+    @Published var showingColorPicker = false
+    let colorEditor = ColorEditor()
     @Published var ignoredSelection: String?
     /// The settings window stays above other apps' windows.
     @Published var keepOnTop = defaults.object(forKey: "keepOnTop") as? Bool ?? false {
@@ -92,7 +104,8 @@ final class AppState: ObservableObject {
 
     var trail: TrailSettings {
         TrailSettings(duration: duration, color: customColor ?? .controlAccentColor,
-                      glide: glide, wordCurve: wordCurve, glow: glow, tailLength: tailLength)
+                      glide: glide, wordCurve: wordCurve, glow: glow, tailLength: tailLength,
+                      opacity: opacity, haloIntensity: haloIntensity)
     }
 }
 

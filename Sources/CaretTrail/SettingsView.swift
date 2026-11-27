@@ -5,13 +5,6 @@ struct SettingsView: View {
     @ObservedObject var state: AppState
     var onTestCaretMoved: (CGRect, CGRect) -> Void = { _, _ in }
 
-    private var trailColor: Binding<Color> {
-        Binding(
-            get: { Color(nsColor: state.trail.color) },
-            set: { state.customColor = NSColor($0) }
-        )
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 18) {
@@ -40,16 +33,26 @@ struct SettingsView: View {
                                 .frame(width: 52, alignment: .trailing)
                         }
                         HStack {
+                            // A disabled slider dims itself but not the texts beside it.
                             Text(state.t("Tail length"))
+                                .foregroundStyle(state.glide ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.primary))
                             Slider(value: $state.tailLength, in: 0.5...4, step: 0.5)
                             Text(String(format: "%.1f×", state.tailLength))
                                 .monospacedDigit()
                                 .frame(width: 52, alignment: .trailing)
+                                .foregroundStyle(state.glide ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.primary))
                         }
                         .disabled(state.glide)
                         HStack {
-                            ColorPicker(state.t("Color"), selection: trailColor, supportsOpacity: false)
-                                .fixedSize()
+                            Text(state.t("Opacity"))
+                            Slider(value: $state.opacity, in: 0.1...1, step: 0.1)
+                            Text("\(Int((state.opacity * 100).rounded())) %")
+                                .monospacedDigit()
+                                .frame(width: 52, alignment: .trailing)
+                        }
+                        HStack {
+                            Text(state.t("Color"))
+                            colorButton
                             Button(state.t("Use system accent color")) { state.customColor = nil }
                             .tint(.white)
                                 .disabled(state.customColor == nil)
@@ -59,6 +62,16 @@ struct SettingsView: View {
                     section(state.t("Glide")) {
                         Toggle(state.t("Fast start, soft landing"), isOn: $state.wordCurve)
                         Toggle(state.t("Hide the real caret (needs Screen Recording)"), isOn: $state.maskCaret)
+                        HStack {
+                            Text(state.t("Halo intensity"))
+                                .foregroundStyle(haloOff ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.primary))
+                            Slider(value: $state.haloIntensity, in: 0.5...3, step: 0.25)
+                            Text(String(format: "%.2f×", state.haloIntensity))
+                                .monospacedDigit()
+                                .frame(width: 52, alignment: .trailing)
+                                .foregroundStyle(haloOff ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.primary))
+                        }
+                        .disabled(!state.glow)
                     }
                     .disabled(!state.glide)
                 }
@@ -115,7 +128,7 @@ struct SettingsView: View {
                 .environment(\.colorScheme, .dark)
         }
         .padding(20)
-        .frame(width: 760)
+        .frame(width: 900)
         .tint(NeonTheme.controlTint(state.trail.color))
         .background(NeonTheme.background(state.trail.color))
         .environment(\.colorScheme, .dark)
@@ -145,6 +158,32 @@ struct SettingsView: View {
         .font(.caption)
         .foregroundStyle(.secondary)
     }
+
+    /// The current colour as a swatch and its hex code; opens the picker.
+    private var colorButton: some View {
+        Button {
+            state.colorEditor.load(state.trail.color)
+            state.colorEditor.onChange = { [weak state] in state?.customColor = $0 }
+            state.showingColorPicker = true
+        } label: {
+            HStack(spacing: 6) {
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(neon)
+                    .frame(width: 22, height: 14)
+                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(.white.opacity(0.3), lineWidth: 1))
+                Text(ColorEditor.hex(of: state.trail.color))
+                    .font(.system(.callout, design: .monospaced))
+            }
+        }
+        .tint(.white)
+        .fixedSize()
+        .popover(isPresented: $state.showingColorPicker, arrowEdge: .bottom) {
+            ColorEditorView(editor: state.colorEditor)
+        }
+    }
+
+    /// The halo slider only matters in glide mode with the halo on.
+    private var haloOff: Bool { !state.glide || !state.glow }
 
     private var neon: Color { Color(nsColor: state.trail.color) }
 
