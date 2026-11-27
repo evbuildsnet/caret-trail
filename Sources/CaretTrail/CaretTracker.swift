@@ -6,6 +6,8 @@ import ApplicationServices
 final class CaretTracker {
     var onCaretMoved: ((_ from: CGRect, _ to: CGRect) -> Void)?
     var onCaretLost: (() -> Void)?
+    /// A caret appeared where there was none: a newly focused field or app.
+    var onCaretFound: ((CGRect) -> Void)?
     var onStatus: ((String) -> Void)?
 
     private(set) var isRunning = false
@@ -34,6 +36,33 @@ final class CaretTracker {
     /// Poll fast while a caret is being followed, slowly while waiting for one to appear.
     private static let trackingPollInterval: TimeInterval = 0.2
     private static let idlePollInterval: TimeInterval = 1
+
+    /// In terminals, a move is trusted only if the caret is still away from its old place after
+    /// this delay. Other apps animate at once: the delay would only make the trail feel late.
+    /// Terminal UIs (Claude Code and other Ink apps) park the real cursor on another line for a
+    /// moment while they redraw; animating that excursion makes the trail bounce away and back.
+    private static let moveConfirmationDelay: TimeInterval = 0.03
+    private var pendingMove: (work: DispatchWorkItem, since: CFTimeInterval)?
+
+    /// Terminal UIs such as Claude Code hide the real cursor and draw their own. When they redraw
+    /// after a pause they leave the hidden cursor at the start of the next line until the next
+    /// key press brings it back, which would draw a trail down and back at every pause. In these
+    /// apps a caret at column 0 is ignored, and the trail resumes from the last real position.
+    static let terminalBundleIDs: Set<String> = [
+        "com.apple.Terminal", "com.googlecode.iterm2", "dev.warp.Warp-Stable",
+        "com.mitchellh.ghostty", "net.kovidgoyal.kitty", "org.alacritty", "com.github.wez.wezterm",
+    ]
+    private var isTerminal = false
+    /// Turns the terminal handling above (column 0 and the confirmation delay) on or off.
+    var terminalWorkaround = true
+    /// Apps never observed nor queried. Changing the set re-attaches to the front app.
+    var ignoredBundleIDs: Set<String> = [] {
+        didSet {
+            guard isRunning, ignoredBundleIDs != oldValue, let app = NSWorkspace.shared.frontmostApplication else { return }
+            attach(to: app)
+        }
+    }
+    private var terminalRules: Bool { terminalWorkaround && isTerminal }
 
     func start() {
         guard !isRunning else { return }
@@ -87,6 +116,10 @@ final class CaretTracker {
             publishStatus("Caret Trail is frontmost. Switch to another app.")
             return
         }
+        if let id = app.bundleIdentifier, ignoredBundleIDs.contains(id) {
+            publishStatus("\(app.localizedName ?? id) is ignored")
+            return
+        }
         var created: AXObserver?
         guard AXObserverCreate(pid, axCallback, &created) == .success, let observer = created else {
             publishStatus("Could not observe \(app.localizedName ?? "app")")
@@ -105,6 +138,7 @@ final class CaretTracker {
         self.observer = observer
         appElement = element
         appName = app.localizedName ?? "pid \(pid)"
+        isTerminal = Self.terminalBundleIDs.contains(app.bundleIdentifier ?? "")
         refresh(focusChanged: true)
     }
 
@@ -147,7 +181,7 @@ final class CaretTracker {
 
     /// Re-reads the caret. A changed selection range means the caret moved by itself: animate.
     /// Same range but a different rect means scrolling or a window move: hide the old trail and remember it.
-    private func refresh(focusChanged: Bool, verifyFocus: Bool = true) {
+    private func refresh(focusChanged: Bool, verifyFocus: Bool = true, confirming: Bool = false) {
         guard let appElement else { return }
         let wasTracking = lastRect != nil
         defer {
@@ -178,7 +212,23 @@ final class CaretTracker {
         }
 
         let moved = lastRange.map { $0.location != range.location } ?? false
-        debugLog("tracker: focusChanged=\(focusChanged) elementChanged=\(elementChanged) moved=\(moved) rect=\(rect) last=\(String(describing: lastRect))")
+        debugLog("tracker: focusChanged=\(focusChanged) elementChanged=\(elementChanged) moved=\(moved) confirming=\(confirming) rect=\(rect) last=\(String(describing: lastRect))")
+        if moved, terminalRules, range.location > 0,
+           string(of: element, range: CFRange(location: range.location - 1, length: 1)) == "\n" {
+            debugLog("tracker: terminal cursor at column 0, ignored")
+            return
+        }
+        if moved, !confirming, terminalRules, let from = lastRect, from != rect {
+            // Hold the trail back until a second read shows the caret really left.
+            if pendingMove == nil { scheduleMoveConfirmation() }
+            return
+        }
+        if !moved, let pending = pendingMove {
+            cancelPendingMove()
+            debugLog("tracker: transient jump ignored, caret back after \(Int((CACurrentMediaTime() - pending.since) * 1000)) ms")
+        } else if confirming, !moved {
+            debugLog("tracker: transient jump ignored at confirmation")
+        }
         if let from = lastRect, from != rect {
             if moved {
                 onCaretMoved?(from, rect)
@@ -189,6 +239,7 @@ final class CaretTracker {
         }
         lastRect = rect
         lastRange = range
+        if !wasTracking { onCaretFound?(rect) }
         publishStatus("\(appName): caret at \(Int(rect.minX)), \(Int(rect.minY)) h=\(Int(rect.height))")
     }
 
@@ -198,7 +249,23 @@ final class CaretTracker {
         publishStatus(reason)
     }
 
+    private func scheduleMoveConfirmation() {
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.isRunning, self.pendingMove != nil else { return }
+            self.pendingMove = nil
+            self.refresh(focusChanged: false, confirming: true)
+        }
+        pendingMove = (work, CACurrentMediaTime())
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.moveConfirmationDelay, execute: work)
+    }
+
+    private func cancelPendingMove() {
+        pendingMove?.work.cancel()
+        pendingMove = nil
+    }
+
     private func clearCaret() {
+        cancelPendingMove()
         let hadCaret = lastRect != nil
         lastRect = nil
         lastRange = nil

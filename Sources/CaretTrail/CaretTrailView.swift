@@ -63,7 +63,14 @@ final class CaretTrailView: NSView {
     private var settings = TrailSettings(duration: 0.12, color: .controlAccentColor)
     private var lastTick: CFTimeInterval = 0
     private var fadeStart: CFTimeInterval = 0
-    private let fadeDuration: CFTimeInterval = 0.14
+    private var fadeDuration: CFTimeInterval { settings.glide ? 0.1 : 0.14 }
+
+    /// Glide mode: a caret-sized bar travels from `from` to `to`, like WordCraft's caret.
+    private struct Glide { var from: CGRect; var to: CGRect; var start: CFTimeInterval }
+    private var glide: Glide?
+    /// Covers the real caret at the destination while ours glides (prototype).
+    private let maskLayer = CALayer()
+    private var maskRect: CGRect?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -77,6 +84,8 @@ final class CaretTrailView: NSView {
         shape.shadowOffset = .zero
         host.opacity = 0
         host.mask = fade
+        maskLayer.isHidden = true
+        host.addSublayer(maskLayer)
         host.addSublayer(shape)
         layer?.addSublayer(host)
     }
@@ -119,6 +128,13 @@ final class CaretTrailView: NSView {
     }
 
     func animate(from: CGRect, to: CGRect, settings: TrailSettings) {
+        if settings.glide {
+            animateGlide(from: from, to: to, settings: settings)
+            return
+        }
+        glide = nil
+        maskRect = nil
+        withoutActions { maskLayer.isHidden = true }
         let now = CACurrentMediaTime()
         self.settings = settings
         let isStarting = phase != .moving
@@ -158,15 +174,55 @@ final class CaretTrailView: NSView {
                 shape.fillColor = (color.blended(withFraction: 0.15, of: .white) ?? color).cgColor
                 shape.shadowColor = color.cgColor
             }
+            shape.strokeColor = NSColor.white.withAlphaComponent(0.85).cgColor
+            shape.shadowOpacity = settings.glow ? 1 : 0
             host.opacity = 1
         }
         render()
         startLink()
     }
 
+    private func animateGlide(from: CGRect, to: CGRect, settings: TrailSettings) {
+        self.settings = settings
+        // Another move before arrival: snap to where the bar was heading and glide on from there.
+        let start = (phase == .moving ? glide?.to : nil) ?? from
+        glide = Glide(from: start, to: to, start: CACurrentMediaTime())
+        phase = .moving
+        target = Self.corners(of: to)
+        springs = Self.corners(of: start).map { Spring(position: $0) }
+        weights = [1, 1, 1, 1]
+        // The real caret is a little wider than its 2 pt rect once antialiased: cover a margin.
+        maskRect = settings.maskColor.map { _ in to.insetBy(dx: -1.5, dy: -1) }
+        withoutActions {
+            effectiveAppearance.performAsCurrentDrawingAppearance {
+                shape.fillColor = (settings.caretColor ?? settings.color).cgColor
+                shape.shadowColor = settings.color.cgColor
+                maskLayer.backgroundColor = settings.maskColor?.cgColor
+            }
+            maskLayer.isHidden = maskRect == nil
+            shape.strokeColor = nil
+            shape.shadowOpacity = settings.glow ? 1 : 0
+            host.opacity = 1
+        }
+        render()
+        startLink()
+    }
+
+    /// Word's glide curve, cubic-bezier(0, 0, 0, 1): with these control points time is u³ and
+    /// distance 3u² − 2u³, so distance = 3s^(2/3) − 2s. Otherwise a plain ease-out.
+    private static func glideEase(_ s: CGFloat, word: Bool) -> CGFloat {
+        let s = min(max(s, 0), 1)
+        return word ? 3 * pow(s, 2.0 / 3.0) - 2 * s : 1 - pow(1 - s, 3)
+    }
+
     func hide() {
         phase = .idle
-        withoutActions { host.opacity = 0 }
+        glide = nil
+        maskRect = nil
+        withoutActions {
+            host.opacity = 0
+            maskLayer.isHidden = true
+        }
         stopLink()
     }
 
@@ -197,6 +253,36 @@ final class CaretTrailView: NSView {
     /// Advances the same frame clock for a display callback or an offscreen rendering check.
     func advanceFrame(at now: CFTimeInterval) {
         switch phase {
+        case .moving where glide != nil:
+            let g = glide!
+            let duration = settings.duration
+            let s = CGFloat(min(1, (now - g.start) / duration))
+            let e = Self.glideEase(s, word: settings.wordCurve)
+            let rect = CGRect(
+                x: g.from.minX + (g.to.minX - g.from.minX) * e,
+                y: g.from.minY + (g.to.minY - g.from.minY) * e,
+                width: g.from.width + (g.to.width - g.from.width) * e,
+                height: g.from.height + (g.to.height - g.from.height) * e
+            )
+            springs = Self.corners(of: rect).map { Spring(position: $0) }
+            render()
+            if s >= 1 {
+                glide = nil
+                if maskRect != nil {
+                    // Hand over to the real caret at once: no fade, it is right underneath.
+                    maskRect = nil
+                    phase = .idle
+                    withoutActions {
+                        maskLayer.isHidden = true
+                        host.opacity = 0
+                    }
+                    stopLink()
+                    onIdle?()
+                } else {
+                    phase = .fading
+                    fadeStart = now
+                }
+            }
         case .moving:
             let dt = min(now - lastTick, 1.0 / 30)
             lastTick = now
@@ -267,7 +353,7 @@ final class CaretTrailView: NSView {
         let restTail = local(centroid(of: target, leading: false))
         let stretch = max(0, hypot(head.x - tail.x, head.y - tail.y) - hypot(restHead.x - restTail.x, restHead.y - restTail.y))
         let tailWidth = max(Self.minTailWidth, 1 / (1 + stretch / Self.taperLength))
-        let tailAlpha = max(Self.minTailAlpha, 1 / (1 + stretch / Self.fadeLength))
+        let tailAlpha = settings.glide ? 1 : max(Self.minTailAlpha, 1 / (1 + stretch / Self.fadeLength))
 
         let path = CGMutablePath()
         path.addLines(between: zip(points, weights).map { point, weight in
@@ -283,12 +369,20 @@ final class CaretTrailView: NSView {
         withoutActions {
             shape.path = path
             // Supplying the silhouette avoids Core Animation discovering it from offscreen alpha.
-            shape.shadowPath = path
-            fade.frame = box
+            // A 2 pt bar blurs into almost nothing: the glide's halo comes from a wider silhouette.
+            shape.shadowPath = settings.glide ? Self.glowSilhouette(around: path.boundingBoxOfPath) : path
+            fade.frame = settings.glide ? bounds : box
+            if let maskRect {
+                maskLayer.frame = CGRect(origin: local(maskRect.origin), size: maskRect.size)
+            }
             fade.startPoint = unit(head)
             fade.endPoint = unit(tail)
             fade.colors = [CGColor(gray: 1, alpha: 1), CGColor(gray: 1, alpha: tailAlpha)]
         }
+    }
+
+    static func glowSilhouette(around box: CGRect) -> CGPath {
+        CGPath(roundedRect: box.insetBy(dx: -3, dy: -1), cornerWidth: 3, cornerHeight: 3, transform: nil)
     }
 
     private func withoutActions(_ body: () -> Void) {
