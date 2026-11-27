@@ -309,7 +309,7 @@ final class CaretTrailView: NSView {
 
     private func advanceSprings(by dt: CGFloat) -> Bool {
         let leadOmega = Self.leadRate / settings.duration
-        let trailOmega = Self.trailRate * tailLooseness / settings.duration
+        let trailOmega = Self.trailRate * tailLooseness / settings.duration / max(settings.tailLength, 0.1)
         var settled = true
         for i in springs.indices {
             springs[i].step(
@@ -352,8 +352,8 @@ final class CaretTrailView: NSView {
         let restHead = local(centroid(of: target, leading: true))
         let restTail = local(centroid(of: target, leading: false))
         let stretch = max(0, hypot(head.x - tail.x, head.y - tail.y) - hypot(restHead.x - restTail.x, restHead.y - restTail.y))
-        let tailWidth = max(Self.minTailWidth, 1 / (1 + stretch / Self.taperLength))
-        let tailAlpha = settings.glide ? 1 : max(Self.minTailAlpha, 1 / (1 + stretch / Self.fadeLength))
+        let tailWidth = max(Self.minTailWidth, 1 / (1 + stretch / (Self.taperLength * settings.tailLength)))
+        let tailAlpha = settings.glide ? 1 : max(Self.minTailAlpha, 1 / (1 + stretch / (Self.fadeLength * settings.tailLength)))
 
         let path = CGMutablePath()
         path.addLines(between: zip(points, weights).map { point, weight in

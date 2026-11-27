@@ -8,8 +8,8 @@ struct IgnoredAppsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Ignored apps").font(.headline)
-            Text("No effect in these apps, and Caret Trail stops asking them where their caret is.")
+            Text(state.t("Ignored apps")).font(.headline)
+            Text(state.t("No effect in these apps, and Caret Trail stops asking them where their caret is."))
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -25,7 +25,7 @@ struct IgnoredAppsView: View {
             .frame(minHeight: 160)
             .overlay {
                 if state.ignoredApps.isEmpty {
-                    Text("No ignored apps").foregroundStyle(.secondary)
+                    Text(state.t("No ignored apps")).foregroundStyle(.secondary)
                 }
             }
 
@@ -35,7 +35,7 @@ struct IgnoredAppsView: View {
                         Button(app.localizedName ?? app.bundleIdentifier ?? "") { add(app.bundleIdentifier) }
                     }
                     Divider()
-                    Button("Other…") { chooseApp() }
+                    Button(state.t("Other…")) { chooseApp() }
                 } label: {
                     Image(systemName: "plus")
                 }
@@ -49,7 +49,7 @@ struct IgnoredAppsView: View {
                 }
                 .disabled(state.ignoredSelection == nil)
                 Spacer()
-                Button("Done") { state.showingIgnoredApps = false }
+                Button(state.t("Done")) { state.showingIgnoredApps = false }
                     .keyboardShortcut(.defaultAction)
             }
         }

@@ -6,9 +6,16 @@ import ApplicationServices
 final class CaretTracker {
     var onCaretMoved: ((_ from: CGRect, _ to: CGRect) -> Void)?
     var onCaretLost: (() -> Void)?
+    /// Set just before `onCaretMoved`: the caret went forward in the text but left on screen,
+    /// i.e. onto a new line. Terminals such as Claude Code scroll the input up as it grows, so
+    /// there the new line can even sit at the same height as the old one.
+    private(set) var lastMoveStartedNewLine = false
     /// A caret appeared where there was none: a newly focused field or app.
     var onCaretFound: ((CGRect) -> Void)?
     var onStatus: ((String) -> Void)?
+    /// Translates status messages (English keys, `%@` placeholders).
+    var tr: (String) -> String = { $0 }
+    private func tr(_ format: String, _ args: CVarArg...) -> String { String(format: tr(format), arguments: args) }
 
     private(set) var isRunning = false
 
@@ -113,16 +120,16 @@ final class CaretTracker {
         defer { schedulePoll() }
         let pid = app.processIdentifier
         guard pid != getpid() else {
-            publishStatus("Caret Trail is frontmost. Switch to another app.")
+            publishStatus(tr("Caret Trail is frontmost. Switch to another app."))
             return
         }
         if let id = app.bundleIdentifier, ignoredBundleIDs.contains(id) {
-            publishStatus("\(app.localizedName ?? id) is ignored")
+            publishStatus(tr("%@ is ignored", app.localizedName ?? id))
             return
         }
         var created: AXObserver?
         guard AXObserverCreate(pid, axCallback, &created) == .success, let observer = created else {
-            publishStatus("Could not observe \(app.localizedName ?? "app")")
+            publishStatus(tr("Could not observe %@", app.localizedName ?? "app"))
             return
         }
         let element = AXUIElementCreateApplication(pid)
@@ -191,7 +198,7 @@ final class CaretTracker {
         let element = verifyFocus ? focusedUIElement(of: appElement) : focusedElement
         guard let element else {
             observeFocusedElement(nil)
-            lose("No focused element in \(appName)")
+            lose(tr("No focused element in %@", appName))
             return
         }
         let elementChanged = focusedElement.map { !CFEqual($0, element) } ?? true
@@ -199,15 +206,15 @@ final class CaretTracker {
         if focusChanged || elementChanged { clearCaret() }
 
         guard let range = selectedRange(of: element) else {
-            lose("\(appName): focused element has no text selection")
+            lose(tr("%@: focused element has no text selection", appName))
             return
         }
         guard range.length == 0 else {
-            lose("\(appName): text selected, caret hidden")
+            lose(tr("%@: text selected, caret hidden", appName))
             return
         }
         guard let rect = caretRect(of: element, location: range.location) else {
-            lose("\(appName): no caret bounds for this element")
+            lose(tr("%@: no caret bounds for this element", appName))
             return
         }
 
@@ -231,6 +238,7 @@ final class CaretTracker {
         }
         if let from = lastRect, from != rect {
             if moved {
+                lastMoveStartedNewLine = (lastRange.map { range.location > $0.location } ?? false) && rect.minX < from.minX - 1
                 onCaretMoved?(from, rect)
             } else {
                 // A scroll or window move invalidates any trail still fading at the old position.
@@ -240,7 +248,7 @@ final class CaretTracker {
         lastRect = rect
         lastRange = range
         if !wasTracking { onCaretFound?(rect) }
-        publishStatus("\(appName): caret at \(Int(rect.minX)), \(Int(rect.minY)) h=\(Int(rect.height))")
+        publishStatus(tr("%@: caret at %@", appName, "\(Int(rect.minX)), \(Int(rect.minY)) h=\(Int(rect.height))"))
     }
 
     private func lose(_ reason: String) {

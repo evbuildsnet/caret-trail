@@ -27,12 +27,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 460, height: 720),
-            styleMask: [.titled, .closable, .miniaturizable],
+            styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         window.title = "Caret Trail"
-        NSApp.mainMenu = Self.makeMainMenu()
+        // The neon background runs under a transparent title bar; the window is always dark.
+        window.titlebarAppearsTransparent = true
+        window.isMovableByWindowBackground = true
+        window.appearance = NSAppearance(named: .darkAqua)
+        NSApp.mainMenu = makeMainMenu()
+        tracker.tr = { [weak self] english in self?.state.t(english) ?? english }
         window.contentView = NSHostingView(rootView: SettingsView(state: state) { [weak self] from, to in
             self?.showTrail(from: from, to: to)
         })
@@ -48,7 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         tracker.onCaretMoved = { [weak self] from, to in
             self?.currentCaret = to
-            self?.showTrail(from: from, to: to)
+            self?.showTrail(from: from, to: to, newLine: self?.tracker.lastMoveStartedNewLine ?? false)
         }
         tracker.onCaretLost = { [weak self] in
             self?.currentCaret = nil
@@ -68,6 +73,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         optionObservers = [
             state.$terminalFix.sink { [weak self] on in self?.tracker.terminalWorkaround = on },
+            // The sink fires before the new value is stored: rebuild the menus on the next turn.
+            state.$language.dropFirst().sink { [weak self] _ in DispatchQueue.main.async { self?.relabelMenus() } },
+            state.$keepOnTop.sink { [weak self] on in self?.window.level = on ? .floating : .normal },
             state.$ignoredApps.sink { [weak self] ids in
                 self?.tracker.ignoredBundleIDs = Set(ids)
                 self?.overlay.hide()
@@ -111,35 +119,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Without a main menu, Cmd+A, Cmd+C, Cmd+V, Cmd+Z and Cmd+Q do nothing in the window.
-    private static func makeMainMenu() -> NSMenu {
+    private func makeMainMenu() -> NSMenu {
+        let t = state.t as (String) -> String
         let main = NSMenu()
         let appItem = NSMenuItem()
         appItem.submenu = NSMenu()
-        appItem.submenu?.addItem(withTitle: "Quit Caret Trail", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appItem.submenu?.addItem(withTitle: t("Quit Caret Trail"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         main.addItem(appItem)
 
         let editItem = NSMenuItem()
-        let edit = NSMenu(title: "Edit")
-        edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
-        edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        let edit = NSMenu(title: t("Edit"))
+        edit.addItem(withTitle: t("Undo"), action: Selector(("undo:")), keyEquivalent: "z")
+        edit.addItem(withTitle: t("Redo"), action: Selector(("redo:")), keyEquivalent: "Z")
         edit.addItem(.separator())
-        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        edit.addItem(withTitle: t("Cut"), action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: t("Copy"), action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: t("Paste"), action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: t("Select All"), action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         editItem.submenu = edit
         main.addItem(editItem)
         return main
     }
 
-    private func showTrail(from: CGRect, to: CGRect) {
+    private func showTrail(from: CGRect, to: CGRect, newLine: Bool = false) {
         guard state.enabled else { return }
         if state.ignoreClicks, CACurrentMediaTime() - lastClick < Self.clickWindow {
             overlay.hide()
             return
         }
         // Down to a following line and back to the left: a line wrap while typing, or Return.
-        if state.noLineBreaks, to.maxY <= from.minY + 1, to.minX < from.minX {
+        // In terminals, sending a message (Return in Claude Code) clears the input and the caret
+        // jumps back to its start on the same row: a long jump left counts as a line break too.
+        let terminalReturn = Self.frontmostIsTerminal && abs(to.minY - from.minY) < 1 && from.minX - to.minX > 8 * to.height
+        if state.noLineBreaks, newLine || terminalReturn || (to.maxY <= from.minY + 1 && to.minX < from.minX) {
             overlay.hide()
             return
         }
@@ -201,6 +213,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private var enabledMenuItem: NSMenuItem?
+    private var statusMenu: NSMenu?
+
+    /// Menus are AppKit, not SwiftUI: they are retitled by hand when the language changes.
+    private func relabelMenus() {
+        NSApp.mainMenu = makeMainMenu()
+        guard let menu = statusMenu else { return }
+        enabledMenuItem?.title = state.t("Enabled")
+        menu.items.first { $0.action == #selector(showSettings) }?.title = state.t("Settings…")
+        menu.items.first { $0.action == #selector(NSApplication.terminate(_:)) }?.title = state.t("Quit Caret Trail")
+    }
+
+    @objc private func statusItemClicked() {
+        let event = NSApp.currentEvent
+        let wantsMenu = event?.type == .rightMouseUp || event?.modifierFlags.contains(.control) == true
+        guard wantsMenu, let item = statusItem, let menu = statusMenu else {
+            showSettings()
+            return
+        }
+        // Attach the menu only for this click, so a left click keeps opening the settings.
+        item.menu = menu
+        item.button?.performClick(nil)
+        item.menu = nil
+    }
     private var ignoreMenuItem: NSMenuItem?
     /// The app in front when the menu bar menu opened (opening it doesn't activate Caret Trail).
     private var menuTargetApp: NSRunningApplication?
@@ -241,17 +276,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(ignore)
             ignoreMenuItem = ignore
             menu.addItem(.separator())
-            let enabled = NSMenuItem(title: "Enabled", action: #selector(toggleEnabled), keyEquivalent: "")
+            let enabled = NSMenuItem(title: state.t("Enabled"), action: #selector(toggleEnabled), keyEquivalent: "")
             enabled.target = self
             enabled.state = state.enabled ? .on : .off
             menu.addItem(enabled)
             enabledMenuItem = enabled
-            let settings = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
+            let settings = NSMenuItem(title: state.t("Settings…"), action: #selector(showSettings), keyEquivalent: ",")
             settings.target = self
             menu.addItem(settings)
             menu.addItem(.separator())
-            menu.addItem(withTitle: "Quit Caret Trail", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-            item.menu = menu
+            menu.addItem(withTitle: state.t("Quit Caret Trail"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+            // Left click opens the settings; right click (or Control-click) shows the menu.
+            statusMenu = menu
+            item.button?.target = self
+            item.button?.action = #selector(statusItemClicked)
+            item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
             statusItem = item
         } else if !menuBar, let item = statusItem {
             NSStatusBar.system.removeStatusItem(item)
@@ -269,7 +308,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
         } catch {
-            state.status = "Open at login failed: \(error.localizedDescription)"
+            state.status = state.t("Open at login failed: %@", error.localizedDescription)
         }
         let actual = SMAppService.mainApp.status == .enabled
         if state.openAtLogin != actual { state.openAtLogin = actual }
@@ -315,12 +354,12 @@ extension AppDelegate: NSMenuDelegate {
         menuTargetApp = usable ? app : nil
         guard let item = ignoreMenuItem else { return }
         guard usable, let app, let id = app.bundleIdentifier else {
-            item.title = "Ignore Front App"
+            item.title = state.t("Ignore Front App")
             item.isEnabled = false
             return
         }
         let name = app.localizedName ?? id
-        item.title = state.ignoredApps.contains(id) ? "Stop Ignoring \(name)" : "Ignore \(name)"
+        item.title = state.ignoredApps.contains(id) ? state.t("Stop Ignoring %@", name) : state.t("Ignore %@", name)
         item.isEnabled = true
     }
 }

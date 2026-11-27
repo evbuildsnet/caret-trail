@@ -9,6 +9,9 @@ struct TrailSettings {
     var wordCurve = false
     /// The soft halo around the trail.
     var glow = true
+    /// Comet only: how far the tail lags behind (1 = original). It also stretches the taper and
+    /// the fade, so a longer tail stays visible instead of thinning out at once.
+    var tailLength: CGFloat = 1
     /// Prototype, glide mode only: cover the real caret with this colour while ours glides.
     var maskColor: NSColor? = nil
     /// The real caret's colour, for our gliding one. Defaults to the trail colour.
@@ -32,6 +35,9 @@ final class AppState: ObservableObject {
             let data = customColor.flatMap { try? NSKeyedArchiver.archivedData(withRootObject: $0, requiringSecureCoding: true) }
             Self.defaults.set(data, forKey: "trailColor")
         }
+    }
+    @Published var tailLength = defaults.object(forKey: "tailLength") as? Double ?? 1 {
+        didSet { Self.defaults.set(tailLength, forKey: "tailLength") }
     }
     @Published var glide = defaults.object(forKey: "glide") as? Bool ?? false {
         didSet { Self.defaults.set(glide, forKey: "glide") }
@@ -65,15 +71,28 @@ final class AppState: ObservableObject {
     /// Window state, not saved: the ignored apps sheet and its selected row.
     @Published var showingIgnoredApps = false
     @Published var ignoredSelection: String?
+    /// The settings window stays above other apps' windows.
+    @Published var keepOnTop = defaults.object(forKey: "keepOnTop") as? Bool ?? false {
+        didSet { Self.defaults.set(keepOnTop, forKey: "keepOnTop") }
+    }
     /// Mirrors the system's login item; the app delegate registers and unregisters it.
     @Published var openAtLogin = false
     @Published var screenAccess = false
     @Published var trusted = false
     @Published var status = "Waiting for the caret to move…"
+    /// "auto" follows the macOS language; otherwise "en", "fr", "it" or "de".
+    @Published var language = defaults.string(forKey: "language") ?? "auto" {
+        didSet { Self.defaults.set(language, forKey: "language") }
+    }
+    var lang: String { language == "auto" ? L10n.systemLanguage : language }
+
+    /// The interface string in the current language (English when no translation exists).
+    func t(_ english: String) -> String { L10n.table[lang]?[english] ?? english }
+    func t(_ english: String, _ args: CVarArg...) -> String { String(format: t(english), arguments: args) }
 
     var trail: TrailSettings {
         TrailSettings(duration: duration, color: customColor ?? .controlAccentColor,
-                      glide: glide, wordCurve: wordCurve, glow: glow)
+                      glide: glide, wordCurve: wordCurve, glow: glow, tailLength: tailLength)
     }
 }
 

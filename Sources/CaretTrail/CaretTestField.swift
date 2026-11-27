@@ -17,7 +17,8 @@ struct CaretTestField: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 420, height: 56))
-        scroll.borderType = .bezelBorder
+        scroll.borderType = .noBorder
+        scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
         let size = scroll.contentSize
         let textView = GlideTextView(frame: NSRect(origin: .zero, size: size))
@@ -30,7 +31,9 @@ struct CaretTestField: NSViewRepresentable {
         textView.textContainer?.widthTracksTextView = true
         textView.delegate = context.coordinator
         textView.isRichText = false
+        textView.drawsBackground = false
         textView.allowsUndo = true
+        textView.usesFontPanel = false
         textView.font = .systemFont(ofSize: 15)
         textView.textContainerInset = NSSize(width: 4, height: 4)
         scroll.documentView = textView
@@ -42,6 +45,7 @@ struct CaretTestField: NSViewRepresentable {
         guard let textView = nsView.documentView as? GlideTextView else { return }
         textView.trail = state.trail
         textView.snapOnClick = state.ignoreClicks
+        textView.snapOnLineBreak = state.noLineBreaks
         textView.glideOn = state.glide
     }
 
@@ -77,6 +81,7 @@ final class GlideTextView: NSTextView {
     }
     var trail = TrailSettings(duration: 0.12, color: .controlAccentColor)
     var snapOnClick = false
+    var snapOnLineBreak = false
 
     private let caret = CALayer()
     private var clickedAt: CFTimeInterval = 0
@@ -109,12 +114,22 @@ final class GlideTextView: NSTextView {
         if !glideOn { super.drawInsertionPoint(in: rect, color: color, turnedOn: flag) }
     }
 
+    /// The trail colour picker's panel sends its colour to the first responder: when that is this
+    /// field, AppKit would paint the test text in the trail colour. Keep the text in its own colour.
+    override func changeColor(_ sender: Any?) {}
+
     override func mouseDown(with event: NSEvent) {
         clickedAt = CACurrentMediaTime()
         super.mouseDown(with: event)
     }
 
     override func becomeFirstResponder() -> Bool {
+        // A text view taking focus pushes its own text colour (white in dark mode) into the shared
+        // colour panel, and the trail colour well, still attached to the panel, takes it: the trail
+        // turned white. Closing the panel first detaches the well.
+        if NSColorPanel.sharedColorPanelExists, NSColorPanel.shared.isVisible {
+            NSColorPanel.shared.close()
+        }
         let accepted = super.becomeFirstResponder()
         if accepted { DispatchQueue.main.async { [weak self] in self?.moveCaret(animated: false) } }
         return accepted
@@ -176,7 +191,9 @@ final class GlideTextView: NSTextView {
         caret.isHidden = false
         CATransaction.commit()
 
-        if animated, placed, !(snapOnClick && byClick), previous != rect.origin {
+        // This view is flipped: down to a following line and back to the left is a wrap or Return.
+        let lineBreak = rect.minY >= previous.y + rect.height - 1 && rect.minX < previous.x
+        if animated, placed, !(snapOnClick && byClick), !(snapOnLineBreak && lineBreak), previous != rect.origin {
             // Replacing a glide under way restarts it from where it was heading, as WordCraft does.
             let glide = CABasicAnimation(keyPath: "position")
             glide.fromValue = NSValue(point: previous)
